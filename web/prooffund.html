@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProofFund</title>
+<style>
+  :root { --ink:#0d2b33; --water:#1f7a8c; --sand:#f3f6f5; --line:#cfdcdc; --ok:#2e7d4f; --wait:#b7791f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--sand); color:var(--ink); font:16px/1.5 system-ui,sans-serif; }
+  main { max-width:620px; margin:0 auto; padding:28px 16px 60px; }
+  h1 { font:700 34px/1.1 Georgia,"Iowan Old Style",serif; margin:0 0 4px; }
+  h2 { font:600 20px Georgia,serif; margin:28px 0 8px; }
+  p.sub { margin:0 0 20px; color:#4a6469; }
+  input, button { width:100%; margin:6px 0; padding:11px 12px; font:inherit; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--ink); }
+  button { background:var(--ink); color:#fff; border-color:var(--ink); cursor:pointer; }
+  button:focus-visible, input:focus-visible { outline:3px solid var(--water); outline-offset:1px; }
+  .row { display:flex; gap:8px; } .row > * { flex:1; }
+  .bar { height:14px; background:#dfe9e9; border-radius:7px; overflow:hidden; margin:8px 0 4px; }
+  .bar i { display:block; height:100%; background:var(--water); }
+  .bar.paid i { background:var(--ok); }
+  ol { list-style:none; padding:0; margin:12px 0; }
+  li { background:#fff; border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:6px 0; }
+  li b { display:block; } li small { color:#4a6469; word-break:break-all; }
+  .Released { color:var(--ok); } .Submitted { color:var(--wait); } .Pending { color:#4a6469; }
+  details { margin-top:22px; } summary { cursor:pointer; font-weight:600; }
+  pre { background:#e6eeee; padding:12px; border-radius:6px; white-space:pre-wrap; word-break:break-all; }
+  code { word-break:break-all; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ProofFund</h1>
+  <p class="sub">Money for community projects, released one proven milestone at a time.</p>
+
+  <p>Acting as: <code id="me"></code></p>
+  <div class="row">
+    <input id="cid" type="number" min="1" value="1" aria-label="Campaign number">
+    <button id="load">Load campaign</button>
+  </div>
+
+  <section id="view" hidden>
+    <h2 id="title"></h2>
+    <div class="bar" id="bar"><i id="fill"></i></div>
+    <p id="numbers"></p>
+    <ol id="miles"></ol>
+    <p id="mine"></p>
+  </section>
+
+  <h2>Give</h2>
+  <input id="give" type="number" min="1" placeholder="Amount in XLM">
+  <button id="donate">Donate</button>
+  <button id="refund">Refund my donation</button>
+
+  <h2>Beneficiary</h2>
+  <input id="eIndex" type="number" min="1" placeholder="Milestone number (1, 2, 3)">
+  <input id="evidence" placeholder="Link or hash that proves it">
+  <button id="submit">Submit evidence</button>
+
+  <h2>Admin</h2>
+  <input id="rIndex" type="number" min="1" placeholder="Milestone number to release">
+  <button id="release">Release milestone</button>
+
+  <pre id="out">Results show up here.</pre>
+
+  <details>
+    <summary>Switch account (testnet only)</summary>
+    <p>Paste a testnet secret key to act as the admin or the beneficiary. Never paste a real key.</p>
+    <input id="secret" placeholder="S...">
+    <button id="useKey">Use this key</button>
+  </details>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@stellar/stellar-sdk@17.4.0/dist/stellar-sdk.min.js"></script>
+<script>
+  // 1. Paste your deployed ProofFund contract ID here.
+  const PROOF_ID = "PASTE_CONTRACT_ID_HERE";
+
+  const { Contract, Keypair, Networks, TransactionBuilder, BASE_FEE, nativeToScVal, scValToNative, rpc } = StellarSdk;
+  const server = new rpc.Server("https://soroban-testnet.stellar.org");
+  const STROOPS = 10000000n;
+
+  const text = (v) => nativeToScVal(v, { type: "string" });
+  const address = (v) => nativeToScVal(v, { type: "address" });
+  const amount = (v) => nativeToScVal(BigInt(v), { type: "i128" });
+  const number = (v) => nativeToScVal(Number(v), { type: "u32" });
+  const val = (id) => document.getElementById(id).value;
+  const xlm = (stroops) => (Number(stroops) / 1e7).toLocaleString(undefined, { maximumFractionDigits: 7 });
+
+  // A testnet key kept in this browser. Fine for a demo, never for real money.
+  let me = loadKey();
+  show();
+  function loadKey() {
+    const saved = localStorage.getItem("demo-key");
+    if (saved) return Keypair.fromSecret(saved);
+    const fresh = Keypair.random();
+    localStorage.setItem("demo-key", fresh.secret());
+    return fresh;
+  }
+  function show() { document.getElementById("me").textContent = me.publicKey(); }
+
+  async function myAccount() {
+    try { return await server.getAccount(me.publicKey()); }
+    catch {
+      await fetch(`https://friendbot.stellar.org/?addr=${me.publicKey()}`);
+      await new Promise((r) => setTimeout(r, 2000));
+      return server.getAccount(me.publicKey());
+    }
+  }
+  async function buildCall(fn, args) {
+    return new TransactionBuilder(await myAccount(), { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+      .addOperation(new Contract(PROOF_ID).call(fn, ...args)).setTimeout(60).build();
+  }
+  async function read(fn, ...args) {
+    const r = await server.simulateTransaction(await buildCall(fn, args));
+    if (rpc.Api.isSimulationError(r)) throw new Error(r.error);
+    return scValToNative(r.result.retval);
+  }
+  async function write(fn, ...args) {
+    const tx = await server.prepareTransaction(await buildCall(fn, args));
+    tx.sign(me);
+    const sent = await server.sendTransaction(tx);
+    const done = await server.pollTransaction(sent.hash, { attempts: 20 });
+    if (done.status !== "SUCCESS") throw new Error(`Transaction failed: ${sent.hash}`);
+    return { done: fn, link: `https://stellar.expert/explorer/testnet/tx/${sent.hash}` };
+  }
+
+  async function render() {
+    const id = val("cid");
+    const c = await read("get_campaign", number(id));
+    const mine = await read("get_contribution", number(id), address(me.publicKey()));
+    const state = (x) => [].concat(x)[0];
+    const pct = Number((c.raised * 100n) / c.target);
+    document.getElementById("view").hidden = false;
+    document.getElementById("title").textContent = c.title;
+    document.getElementById("fill").style.width = pct + "%";
+    document.getElementById("bar").className = "bar" + (state(c.status) === "Completed" ? " paid" : "");
+    document.getElementById("numbers").textContent =
+      `${xlm(c.raised)} of ${xlm(c.target)} XLM raised. ${xlm(c.released)} XLM paid out. Status: ${state(c.status)}.`;
+    document.getElementById("miles").innerHTML = c.milestones.map((m, i) =>
+      `<li><b>${i + 1}. ${esc(m.title)} (${xlm(m.amount)} XLM)</b><span class="${state(m.state)}">${state(m.state)}</span>` +
+      (m.evidence ? `<br><small>${esc(m.evidence)}</small>` : "") + `</li>`).join("");
+    document.getElementById("mine").textContent = `You have given ${xlm(mine)} XLM to this campaign.`;
+    return `Loaded campaign ${id}`;
+  }
+  function esc(s) { return String(s).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch])); }
+
+  function button(id, action) {
+    document.getElementById(id).onclick = async () => {
+      const out = document.getElementById("out");
+      out.textContent = "Working...";
+      try {
+        const result = await action();
+        out.textContent = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+        if (id !== "load") await render();
+      } catch (e) { out.textContent = `Error: ${e.message}`; }
+    };
+  }
+
+  button("load", render);
+  button("donate", () => write("donate", number(val("cid")), address(me.publicKey()), amount(BigInt(Math.round(Number(val("give")) * 1e7)))));
+  button("refund", () => write("refund", number(val("cid")), address(me.publicKey())));
+  button("submit", () => write("submit_evidence", number(val("cid")), number(Number(val("eIndex")) - 1), text(val("evidence"))));
+  button("release", () => write("release_milestone", number(val("cid")), number(Number(val("rIndex")) - 1)));
+  button("useKey", async () => {
+    me = Keypair.fromSecret(val("secret").trim());
+    localStorage.setItem("demo-key", me.secret());
+    document.getElementById("secret").value = "";
+    show();
+    return "Now acting as " + me.publicKey();
+  });
+</script>
+</body>
+</html>
