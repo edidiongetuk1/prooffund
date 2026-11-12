@@ -12,9 +12,10 @@
   h1 { font:700 34px/1.1 Georgia,"Iowan Old Style",serif; margin:0 0 4px; }
   h2 { font:600 20px Georgia,serif; margin:28px 0 8px; }
   p.sub { margin:0 0 20px; color:#4a6469; }
-  input, button { width:100%; margin:6px 0; padding:11px 12px; font:inherit; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--ink); }
+  input, button, textarea { width:100%; margin:6px 0; padding:11px 12px; font:inherit; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--ink); }
+  textarea { min-height:90px; resize:vertical; }
   button { background:var(--ink); color:#fff; border-color:var(--ink); cursor:pointer; }
-  button:focus-visible, input:focus-visible { outline:3px solid var(--water); outline-offset:1px; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible { outline:3px solid var(--water); outline-offset:1px; }
   .row { display:flex; gap:8px; } .row > * { flex:1; }
   .bar { height:14px; background:#dfe9e9; border-radius:7px; overflow:hidden; margin:8px 0 4px; }
   .bar i { display:block; height:100%; background:var(--water); }
@@ -27,6 +28,7 @@
   pre { background:#e6eeee; padding:12px; border-radius:6px; white-space:pre-wrap; word-break:break-all; }
   code { word-break:break-all; }
   a { color:var(--water); }
+  label small { color:#4a6469; }
 </style>
 </head>
 <body>
@@ -64,6 +66,18 @@
   <input id="rIndex" type="number" min="1" placeholder="Milestone number to release">
   <button id="release">Release milestone</button>
 
+  <details>
+    <summary>Create a new campaign (admin)</summary>
+    <input id="nTitle" placeholder="Campaign title, e.g. School library">
+    <input id="nBeneficiary" placeholder="Beneficiary address (G...)" value="GBHRJ3PQZFFLZRJJ4XTYFYVOH75A63M55XVV5DFO2J26R37IIRUF2AVA">
+    <label for="nMiles"><small>One milestone per line: title, amount in XLM</small></label>
+    <textarea id="nMiles">Books, 50
+Shelves, 30
+Opening, 20</textarea>
+    <input id="nHours" type="number" min="1" value="72" aria-label="Deadline in hours" placeholder="Deadline in hours from now">
+    <button id="create">Create campaign</button>
+  </details>
+
   <pre id="out">Results show up here.</pre>
 
   <details>
@@ -76,17 +90,17 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@stellar/stellar-sdk@17.4.0/dist/stellar-sdk.min.js"></script>
 <script>
-  // 1. Paste your deployed ProofFund contract ID here.
   const PROOF_ID = "CABZH23CCMHVLJ63OTWXV3PX3UCFN7RIBWVN7JXZNWONBZCJQTOY7UKH";
 
-  const { Contract, Keypair, Networks, TransactionBuilder, BASE_FEE, nativeToScVal, scValToNative, rpc } = StellarSdk;
+  const { Contract, Keypair, Networks, TransactionBuilder, BASE_FEE, nativeToScVal, scValToNative, xdr, rpc } = StellarSdk;
   const server = new rpc.Server("https://soroban-testnet.stellar.org");
-  const STROOPS = 10000000n;
 
   const text = (v) => nativeToScVal(v, { type: "string" });
   const address = (v) => nativeToScVal(v, { type: "address" });
   const amount = (v) => nativeToScVal(BigInt(v), { type: "i128" });
   const number = (v) => nativeToScVal(Number(v), { type: "u32" });
+  const u64 = (v) => nativeToScVal(BigInt(v), { type: "u64" });
+  const vec = (items) => xdr.ScVal.scvVec(items);
   const val = (id) => document.getElementById(id).value;
   const xlm = (stroops) => (Number(stroops) / 1e7).toLocaleString(undefined, { maximumFractionDigits: 7 });
 
@@ -126,7 +140,9 @@
     const sent = await server.sendTransaction(tx);
     const done = await server.pollTransaction(sent.hash, { attempts: 20 });
     if (done.status !== "SUCCESS") throw new Error(`Transaction failed: ${sent.hash}`);
-    return { done: fn, link: `https://stellar.expert/explorer/testnet/tx/${sent.hash}` };
+    let returned;
+    try { returned = done.returnValue ? scValToNative(done.returnValue) : undefined; } catch {}
+    return { done: fn, returned, link: `https://stellar.expert/explorer/testnet/tx/${sent.hash}` };
   }
 
   async function render() {
@@ -165,6 +181,29 @@
   }
   function esc(s) { return String(s).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch])); }
 
+  async function createCampaign() {
+    const title = val("nTitle").trim();
+    const beneficiary = val("nBeneficiary").trim();
+    if (!title) throw new Error("Enter a campaign title.");
+    if (!beneficiary) throw new Error("Enter a beneficiary address.");
+    const lines = val("nMiles").split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) throw new Error("Add at least one milestone.");
+    const titles = [], amounts = [];
+    for (const line of lines) {
+      const i = line.lastIndexOf(",");
+      const t = line.slice(0, i).trim();
+      const a = Number(line.slice(i + 1));
+      if (i < 0 || !t || !(a > 0)) throw new Error(`Bad milestone line: "${line}". Use: title, amount`);
+      titles.push(text(t));
+      amounts.push(amount(BigInt(Math.round(a * 1e7))));
+    }
+    const hours = Number(val("nHours")) || 72;
+    const deadline = Math.floor(Date.now() / 1000 + hours * 3600);
+    const result = await write("create_campaign", address(beneficiary), text(title), vec(titles), vec(amounts), u64(deadline));
+    if (result.returned !== undefined) document.getElementById("cid").value = String(result.returned);
+    return result;
+  }
+
   function button(id, action) {
     document.getElementById(id).onclick = async () => {
       const out = document.getElementById("out");
@@ -172,7 +211,8 @@
       try {
         const result = await action();
         if (result && result.link) {
-          out.innerHTML = `${esc(result.done)} succeeded. <a href="${esc(result.link)}" target="_blank" rel="noopener">View transaction on Stellar Expert</a>`;
+          const extra = result.done === "create_campaign" && result.returned !== undefined ? ` Campaign number: ${esc(result.returned)}.` : "";
+          out.innerHTML = `${esc(result.done)} succeeded.${extra} <a href="${esc(result.link)}" target="_blank" rel="noopener">View transaction on Stellar Expert</a>`;
         } else {
           out.textContent = typeof result === "string" ? result : JSON.stringify(result, null, 2);
         }
@@ -186,6 +226,7 @@
   button("refund", () => write("refund", number(val("cid")), address(me.publicKey())));
   button("submit", () => write("submit_evidence", number(val("cid")), number(Number(val("eIndex")) - 1), text(val("evidence"))));
   button("release", () => write("release_milestone", number(val("cid")), number(Number(val("rIndex")) - 1)));
+  button("create", createCampaign);
   button("useKey", async () => {
     me = Keypair.fromSecret(val("secret").trim());
     localStorage.setItem("demo-key", me.secret());
