@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Stellar app</title>
+<style>
+  body { max-width: 560px; margin: 0 auto; padding: 24px 16px; font: 16px/1.5 system-ui, sans-serif; }
+  input, button { display: block; width: 100%; box-sizing: border-box; margin: 8px 0; padding: 12px; font: inherit; }
+  pre { padding: 12px; background: #f2f4f3; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+  <h1>My Stellar app</h1>
+  <p>Test account: <code id="me"></code></p>
+
+  <h2>Read from a contract</h2>
+  <input id="to" value="Uyo">
+  <button id="read">Say hello</button>
+
+  <h2>Write to a contract</h2>
+  <input id="name" placeholder="Your name">
+  <input id="message" placeholder="Your message">
+  <button id="write">Sign the wall</button>
+
+  <pre id="out">Results show up here.</pre>
+
+  <script src="https://cdn.jsdelivr.net/npm/@stellar/stellar-sdk@17.4.0/dist/stellar-sdk.min.js"></script>
+  <script>
+    // 1. Paste your contract IDs here.
+    const HELLO_ID = "CAP6BWDUHVYIF5YNEO3QH23USQCZF2GFXRG5LHMDTLIW6LVESSQEUROY";
+    const WALL_ID = "CB5EZ2C3JXSXW7PNCQ6EE7GLKUKL332REK62ARDBH3UUNNY2LQAD2R5I";
+
+    // 2. Change these buttons to call your own functions.
+    button("read", () => read(HELLO_ID, "hello", text(value("to"))));
+
+    button("write", () =>
+      write(WALL_ID, "sign", address(me.publicKey()), text(value("name")), text(value("message"))),
+    );
+
+    // 3. You can leave everything below this line alone.
+    const { Contract, Keypair, Networks, TransactionBuilder, BASE_FEE, nativeToScVal, scValToNative, rpc } = StellarSdk;
+    const server = new rpc.Server("https://soroban-testnet.stellar.org");
+
+    // Turn plain values into what a contract expects.
+    function text(value) { return nativeToScVal(value, { type: "string" }); }
+    function address(value) { return nativeToScVal(value, { type: "address" }); }
+    function amount(value) { return nativeToScVal(BigInt(value), { type: "i128" }); }
+    function number(value) { return nativeToScVal(Number(value), { type: "u32" }); }
+
+    // A throwaway testnet key kept in this browser. It's fine for a demo and never for real money.
+    // For real users, connect a wallet with Stellar Wallets Kit or use Pollar.
+    const me = loadKey();
+    document.getElementById("me").textContent = me.publicKey();
+
+    function loadKey() {
+      const saved = localStorage.getItem("demo-key");
+      if (saved) return Keypair.fromSecret(saved);
+      const fresh = Keypair.random();
+      localStorage.setItem("demo-key", fresh.secret());
+      return fresh;
+    }
+
+    async function myAccount() {
+      try {
+        return await server.getAccount(me.publicKey());
+      } catch {
+        await fetch(`https://friendbot.stellar.org/?addr=${me.publicKey()}`);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        return server.getAccount(me.publicKey());
+      }
+    }
+
+    async function buildCall(contractId, fn, args) {
+      const operation = new Contract(contractId).call(fn, ...args);
+      return new TransactionBuilder(await myAccount(), { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+        .addOperation(operation)
+        .setTimeout(60)
+        .build();
+    }
+
+    // Read: asks the network what would happen. It's free and nothing is saved.
+    async function read(contractId, fn, ...args) {
+      const result = await server.simulateTransaction(await buildCall(contractId, fn, args));
+      if (rpc.Api.isSimulationError(result)) throw new Error(result.error);
+      return scValToNative(result.result.retval);
+    }
+
+    // Write: signs a real transaction and waits for it to land.
+    async function write(contractId, fn, ...args) {
+      const tx = await server.prepareTransaction(await buildCall(contractId, fn, args));
+      tx.sign(me);
+      const sent = await server.sendTransaction(tx);
+      const result = await server.pollTransaction(sent.hash, { attempts: 20 });
+      if (result.status !== "SUCCESS") throw new Error(`Transaction failed: ${sent.hash}`);
+      return {
+        returned: result.returnValue ? scValToNative(result.returnValue) : null,
+        link: `https://stellar.expert/explorer/testnet/tx/${sent.hash}`,
+      };
+    }
+
+    function value(id) { return document.getElementById(id).value; }
+
+    function button(id, action) {
+      document.getElementById(id).onclick = async () => {
+        const out = document.getElementById("out");
+        out.textContent = "Working...";
+        try {
+          const result = await action();
+          out.textContent = JSON.stringify(result, (key, item) => (typeof item === "bigint" ? item.toString() : item), 2);
+        } catch (error) {
+          out.textContent = `Error: ${error.message}`;
+        }
+      };
+    }
+  </script>
+</body>
+</html>
