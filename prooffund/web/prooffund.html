@@ -26,12 +26,14 @@
   details { margin-top:22px; } summary { cursor:pointer; font-weight:600; }
   pre { background:#e6eeee; padding:12px; border-radius:6px; white-space:pre-wrap; word-break:break-all; }
   code { word-break:break-all; }
+  a { color:var(--water); }
 </style>
 </head>
 <body>
 <main>
   <h1>ProofFund</h1>
   <p class="sub">Money for community projects, released one proven milestone at a time.</p>
+  <p><a id="explorer" target="_blank" rel="noopener">View contract on Stellar Expert</a></p>
 
   <p>Acting as: <code id="me"></code></p>
   <div class="row">
@@ -43,6 +45,7 @@
     <h2 id="title"></h2>
     <div class="bar" id="bar"><i id="fill"></i></div>
     <p id="numbers"></p>
+    <p id="deadline"></p>
     <ol id="miles"></ol>
     <p id="mine"></p>
   </section>
@@ -98,6 +101,7 @@
     return fresh;
   }
   function show() { document.getElementById("me").textContent = me.publicKey(); }
+  document.getElementById("explorer").href = `https://stellar.expert/explorer/testnet/contract/${PROOF_ID}`;
 
   async function myAccount() {
     try { return await server.getAccount(me.publicKey()); }
@@ -137,9 +141,25 @@
     document.getElementById("bar").className = "bar" + (state(c.status) === "Completed" ? " paid" : "");
     document.getElementById("numbers").textContent =
       `${xlm(c.raised)} of ${xlm(c.target)} XLM raised. ${xlm(c.released)} XLM paid out. Status: ${state(c.status)}.`;
+
+    let dlText = "";
+    if (c.deadline !== undefined) {
+      const left = Number(c.deadline) * 1000 - Date.now();
+      if (left > 0) {
+        dlText = `Deadline in ${Math.floor(left / 3600000)}h ${Math.floor((left % 3600000) / 60000)}m`;
+      } else {
+        dlText = c.raised < c.target ? "Deadline passed. Refunds are open." : "Deadline passed.";
+      }
+    }
+    document.getElementById("deadline").textContent = dlText;
+
     document.getElementById("miles").innerHTML = c.milestones.map((m, i) =>
       `<li><b>${i + 1}. ${esc(m.title)} (${xlm(m.amount)} XLM)</b><span class="${state(m.state)}">${state(m.state)}</span>` +
-      (m.evidence ? `<br><small>${esc(m.evidence)}</small>` : "") + `</li>`).join("");
+      (m.evidence
+        ? `<br><small>${/^https?:\/\//.test(m.evidence)
+            ? `<a href="${esc(m.evidence)}" target="_blank" rel="noopener">${esc(m.evidence)}</a>`
+            : esc(m.evidence)}</small>`
+        : "") + `</li>`).join("");
     document.getElementById("mine").textContent = `You have given ${xlm(mine)} XLM to this campaign.`;
     return `Loaded campaign ${id}`;
   }
@@ -151,7 +171,11 @@
       out.textContent = "Working...";
       try {
         const result = await action();
-        out.textContent = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+        if (result && result.link) {
+          out.innerHTML = `${esc(result.done)} succeeded. <a href="${esc(result.link)}" target="_blank" rel="noopener">View transaction on Stellar Expert</a>`;
+        } else {
+          out.textContent = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+        }
         if (id !== "load") await render();
       } catch (e) { out.textContent = `Error: ${e.message}`; }
     };
